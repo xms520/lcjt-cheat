@@ -9,17 +9,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ldid + dpkg
+      - name: Install ldid
         run: |
-          brew install ldid dpkg 2>/dev/null || brew install ldid
-          which ldid || (curl -L https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 -o /usr/local/bin/ldid && chmod +x /usr/local/bin/ldid)
-          ldid -h 2>&1 | head -2 || true
+          brew install ldid 2>/dev/null || true
+          if ! command -v ldid >/dev/null; then
+            mkdir -p $HOME/bin
+            curl -L -o $HOME/bin/ldid https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64
+            chmod +x $HOME/bin/ldid
+            echo "$HOME/bin" >> $GITHUB_PATH
+          fi
+          export PATH=$HOME/bin:$PATH
+          ldid -h 2>&1 | head -3 || echo "ldid check skip"
 
       - name: Setup Theos
         run: |
           export THEOS=$HOME/theos
           git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
-          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks
+          [ -d $THEOS/sdks ] || git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "$THEOS/bin" >> $GITHUB_PATH
           ls $THEOS/sdks
