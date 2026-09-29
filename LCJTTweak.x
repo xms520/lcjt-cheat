@@ -468,6 +468,53 @@ static void LCJTEnsureOverlay(void) {
             host.bounds.size.width, host.bounds.size.height);
 }
 
+
+// ==================== 崩溃捕获 ====================
+static void LCJTCrashHandler(int sig) {
+    void *bt[48];
+    int n = backtrace(bt, 48);
+    NSString *p = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
+                   stringByAppendingPathComponent:@"lcjt_crash.txt"];
+    FILE *f = fopen(p.UTF8String, "a");
+    if (f) {
+        fprintf(f, "=== SIGNAL %d ===\n", sig);
+        backtrace_symbols_fd(bt, n, fileno(f));
+        fclose(f);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static void LCJTInstallCrashHandler(void) {
+    signal(SIGSEGV, LCJTCrashHandler);
+    signal(SIGBUS,  LCJTCrashHandler);
+    signal(SIGABRT, LCJTCrashHandler);
+    signal(SIGILL,  LCJTCrashHandler);
+    signal(SIGTRAP, LCJTCrashHandler);
+}
+
+// ==================== 时间 hook 安装 (fishhook, 零外部依赖) ====================
+static void LCJTFaultTolerantInstall(void) {
+    if (!g_gameBase) LCJTFindGameImage();
+    if (!g_gameBase) { LCJTLog(@"未找到主二进制, 跳过时间hook"); return; }
+    struct rebinding rb[5] = {
+        { "gettimeofday",       (void *)m_gtod,  (void **)&o_gtod  },
+        { "time",               (void *)m_time,  (void **)&o_time  },
+        { "clock_gettime",      (void *)m_cgt,   (void **)&o_cgt   },
+        { "CACurrentMediaTime", (void *)m_media, (void **)&o_media },
+        { "mach_absolute_time", (void *)m_mach,  (void **)&o_mach  },
+    };
+    intptr_t slide = 0;
+    uint32_t nimgs = _dyld_image_count();
+    for (uint32_t i = 0; i < nimgs; i++) {
+        if ((uintptr_t)_dyld_get_image_header(i) == g_gameBase) {
+            slide = _dyld_get_image_vmaddr_slide(i); break;
+        }
+    }
+    int r = rebind_symbols_image((void *)g_gameBase, slide, rb, 5);
+    LCJTLog(@"时间hook(fishhook) r=%d slide=%#lx gtod=%p time=%p cgt=%p media=%p mach=%p",
+            r, (unsigned long)slide, o_gtod, o_time, o_cgt, o_media, o_mach);
+}
+
 %ctor {
     @autoreleasepool {
         LCJTInstallCrashHandler();          // ★ 最先安装
