@@ -289,6 +289,7 @@ static UIColor *CGreen(void) { return [UIColor colorWithRed:0.18 green:0.78 blue
 static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
 static void LCJTDumpHotUpdateAsync(void);
 static void LCJTAnalyzeCombatAsync(void);
+static void LCJTDumpLuaImageAsync(void);
 
 @interface LCJTUI : NSObject
 + (void)refresh;
@@ -299,6 +300,7 @@ static void LCJTAnalyzeCombatAsync(void);
 + (void)placePanel;
 + (void)onScanFiles:(id)b;
 + (void)onAnalyze:(id)b;
++ (void)onDumpLuaImg:(id)b;
 @end
 @interface LCJTHelper : NSObject
 - (void)onBallTap:(id)g;
@@ -349,6 +351,12 @@ static void LCJTAnalyzeCombatAsync(void);
     [self refresh];
 }
 + (void)onClose:(id)b { LCJTLog(@"面板: 点关闭"); g_panelOpen = NO; g_panel.hidden = YES; }
++ (void)onDumpLuaImg:(id)b {
+    LCJTLog(@"面板: 点dumpLua内存");
+    g_note = @"dump Lua内存…";
+    [self refresh];
+    LCJTDumpLuaImageAsync();
+}
 + (void)onAnalyze:(id)b {
     LCJTLog(@"面板: 点源码摘要");
     g_note = @"分析战斗源码…";
@@ -404,6 +412,7 @@ static void LCJTAnalyzeCombatAsync(void);
 - (void)onClose:(id)s { [LCJTUI onClose:s]; }
 - (void)onScanFiles:(id)s { [LCJTUI onScanFiles:s]; }
 - (void)onAnalyze:(id)s { [LCJTUI onAnalyze:s]; }
+- (void)onDumpLuaImg:(id)s { [LCJTUI onDumpLuaImg:s]; }
 @end
 
 // ★ target 绝不能为 nil: UIControl 事件在 target=nil 时被静默丢弃(不报错不崩溃)
@@ -535,6 +544,90 @@ static NSString *LCJTReadText(NSString *path) {
     // 最终兜底: 按 latin1 解(保证不丢数据), 中文会乱码但不影响 ASCII 关键词匹配
     t = [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
     return t;
+}
+
+
+// ==================== LuaJIT 字节码 / 源码内存 dump ====================
+// 磁盘 .lua 是加密的(SetXXTEAKeyGM + Decode6BitBuf), 但 LuaJIT 运行时要解密加载
+//  → 内存中必存在【解密的 LuaJIT 字节码 \x1bLJ\x02】或【明文源码文本】
+static void LCJTDumpLuaImage(void) {
+    @autoreleasepool {
+        NSString *bp = [LCJTDocPath() stringByAppendingPathComponent:@"lcjt_luac_dump.bin"];
+        NSString *sp = [LCJTDocPath() stringByAppendingPathComponent:@"lcjt_lua_src.txt"];
+        FILE *fb = fopen(bp.UTF8String, "wb");
+        FILE *fs = fopen(sp.UTF8String, "w");
+        const size_t kChunk = 1 << 22;
+        uint8_t *buf = malloc(kChunk + 16);
+        if (!buf) { if (fb) fclose(fb); if (fs) fclose(fs); return; }
+
+        int nBC = 0, nSrc = 0;
+        uint64_t total = 0;
+        vm_address_t addr = 0; vm_size_t vsz = 0; uint32_t depth = 0;
+        while (total < (uint64_t)512 * 1024 * 1024) {
+            struct vm_region_submap_info_64 info;
+            mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+            vm_size_t isz = sizeof(info);
+            if (vm_region_recurse_64(mach_task_self(), &addr, &vsz, &depth,
+                                     (vm_region_info_t)&info, &cnt) != KERN_SUCCESS || vsz == 0) break;
+            if ((info.protection & 3) == 3) {         // RW
+                size_t off = 0;
+                while (off < vsz && total < (uint64_t)512 * 1024 * 1024) {
+                    size_t want = vsz - off; if (want > kChunk) want = kChunk;
+                    vm_size_t got = 0;
+                    if (vm_read_overwrite(mach_task_self(), addr + off, (vm_size_t)want,
+                                          (vm_address_t)buf, &got) == KERN_SUCCESS && got > 16) {
+                        total += got;
+                        // --- 1) LuaJIT 字节码签名 \x1bLJ\x02 ---
+                        for (size_t i = 0; i + 8 < got; i++) {
+                            if (buf[i] == 0x1b && buf[i+1] == 'L' && buf[i+2] == 'J' && buf[i+3] == 0x02) {
+                                if (fb) {
+                                    fprintf(fb, "\n=@@ADDR=%#llx LEN=%zu@@=\n",
+                                            (unsigned long long)(addr + off + i), got - i);
+                                    fwrite(buf + i, 1, got - i, fb);
+                                    fflush(fb);
+                                }
+                                nBC++;
+                                break;   // 每 chunk 最多记 1 个起点, 避免爆炸
+                            }
+                        }
+                        // --- 2) 含 Lua 语法的长文本 ---
+                        size_t i = 0;
+                        while (i + 32 < got) {
+                            if (buf[i] >= 0x20 && buf[i] < 0x7f) {
+                                size_t j = i;
+                                while (j < got && (buf[j] >= 0x20 || buf[j] == 10 || buf[j] == 9) && (j - i) < 65536) j++;
+                                size_t len = j - i;
+                                if (len > 120) {
+                                    // 检查是否像 Lua 源码
+                                    int hasFn = 0, hasEnd = 0, cnt2 = 0;
+                                    for (size_t k = i; k < j && cnt2 < 6; k++) {
+                                        if (buf[k] == 'f' && k + 8 < j && !memcmp(buf + k, "function", 8)) { hasFn = 1; cnt2++; }
+                                        else if (buf[k] == 'l' && k + 5 < j && !memcmp(buf + k, "local ", 6)) { hasEnd = 1; cnt2++; }
+                                    }
+                                    if (hasFn || hasEnd) {
+                                        nSrc++;
+                                        if (fs) { fwrite(buf + i, 1, len, fs); fputs("\n@@END@@\n", fs); fflush(fs); }
+                                    }
+                                }
+                                i = j;
+                            } else i++;
+                        }
+                    } else off += want;
+                }
+            }
+            addr += vsz;
+            if (!addr) break;
+        }
+        free(buf);
+        if (fb) fclose(fb);
+        if (fs) fclose(fs);
+        g_note = [NSString stringWithFormat:@"字节码%d 源码段%d", nBC, nSrc];
+        LCJTLog(@"Lua内存dump完成: 扫描%lluMB 字节码块=%d 源码段=%d -> %@ / %@",
+                total / 1024 / 1024, nBC, nSrc, bp, sp);
+    }
+}
+static void LCJTDumpLuaImageAsync(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ LCJTDumpLuaImage(); });
 }
 
 // ==================== 战斗源码摘要器 ====================
@@ -741,7 +834,7 @@ static void LCJTEnsureOverlay(void) {
     [ball addSubview:bl];
     [g_overlay addSubview:ball];
 
-    CGFloat W = 260, H = 308;
+    CGFloat W = 260, H = 342;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, H)];
     g_panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
     g_panel.layer.cornerRadius = 14; g_panel.layer.masksToBounds = YES;
@@ -759,12 +852,13 @@ static void LCJTEnsureOverlay(void) {
     [g_panel addSubview:MkBtn(@"Lua探针(导出游戏符号)", @selector(onToggleProbe:), NO, 118, W)];
     [g_panel addSubview:MkBtn(@"扫描热更(dump Lua源码)", @selector(onScanFiles:), NO, 152, W)];
     [g_panel addSubview:MkBtn(@"分析战斗源码(出摘要)", @selector(onAnalyze:), NO, 186, W)];
-    UILabel *hint = MkLabel(CGRectMake(12, 224, W - 24, 28),
+    [g_panel addSubview:MkBtn(@"dump Lua内存(字节码/源码)", @selector(onDumpLuaImg:), NO, 220, W)];
+    UILabel *hint = MkLabel(CGRectMake(12, 258, W - 24, 28),
                             @"秒杀/无敌/移速/攻速 需探针结果后接入", 9.5,
                             [UIColor colorWithWhite:0.62 alpha:1]);
     hint.numberOfLines = 2;
     [g_panel addSubview:hint];
-    g_status = MkLabel(CGRectMake(12, 246, W - 24, 54), @"", 10, [UIColor colorWithWhite:0.85 alpha:1]);
+    g_status = MkLabel(CGRectMake(12, 280, W - 24, 54), @"", 10, [UIColor colorWithWhite:0.85 alpha:1]);
     g_status.numberOfLines = 4;
     [g_panel addSubview:g_status];
     g_panel.hidden = YES;
