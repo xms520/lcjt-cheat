@@ -421,6 +421,39 @@ static UIButton *MkBtn(NSString *t, SEL sel, BOOL on, CGFloat y, CGFloat W) {
     [b addTarget:g_winDelegate action:sel forControlEvents:UIControlEventTouchUpInside];
     return b;
 }
+
+// ==================== 自绘悬浮球 ====================
+// 不用 UIButton: UIControl 事件链依赖 window 状态, 自绘 touches 更可靠
+static BOOL g_ballMoved = NO;
+static CGPoint g_ballStart, g_ballOrigin;
+
+@interface LCJTBallView : UIView
+@end
+@implementation LCJTBallView
+- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)e {
+    g_ballMoved = NO;
+    UITouch *t = [touches anyObject];
+    g_ballStart  = [t locationInView:self.superview];
+    g_ballOrigin = self.center;
+}
+- (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)e {
+    g_ballMoved = YES;
+    UITouch *t = [touches anyObject];
+    CGPoint p = [t locationInView:self.superview];
+    self.center = CGPointMake(g_ballOrigin.x + p.x - g_ballStart.x,
+                              g_ballOrigin.y + p.y - g_ballStart.y);
+    if (g_panelOpen) g_panel.center = CGPointMake(self.center.x + 150, self.center.y + 100);
+}
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)e {
+    if (!g_ballMoved) {
+        g_panelOpen = !g_panelOpen;
+        g_panel.hidden = !g_panelOpen;
+        [LCJTUI refresh];
+    }
+}
+- (void)touchesCancelled:(NSSet *)t withEvent:(UIEvent *)e {}
+@end
+
 // 找当前活跃的 UIWindowScene (iOS 13+ 必须绑定 windowScene, 否则触摸路由异常)
 static id LCJTActiveScene(void) {
     if (@available(iOS 13.0, *)) {
@@ -448,16 +481,14 @@ static void LCJTEnsureOverlay(void) {
 
     UIWindow *w = nil;
     id scene = LCJTActiveScene();
-    if (scene) {
-        SEL sel = NSSelectorFromString(@"initWithWindowScene:");
-        if ([LCJTPassThroughWindow instancesRespondToSelector:sel]) {
-            w = ((id (*)(id, SEL, id))objc_msgSend)([LCJTPassThroughWindow alloc], sel, scene);
-        }
+    w = [[LCJTPassThroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    if (@available(iOS 13.0, *)) {
+        if (scene) w.windowScene = (UIWindowScene *)scene;   // ★ 显式绑定(必须!)
     }
-    if (!w) w = [[LCJTPassThroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    if (!w) { LCJTLog(@"⚠️ 无法创建悬浮窗口"); return; }
-
-    w.windowLevel = UIWindowLevelAlert + 1;   // 盖在游戏之上
+    if (!w) { LCJTLog(@"无法创建悬浮窗口"); return; }
+    LCJTLog(@"窗口 scene绑定=%d (scene=%p w.windowScene=%p)",
+            (scene != nil), scene, (void *)w.windowScene);
+    w.windowLevel = 100000;   // 远高于游戏窗口
     w.backgroundColor = UIColor.clearColor;
     w.hidden = YES;   // 稍后统一 setHidden:NO
 
@@ -475,19 +506,16 @@ static void LCJTEnsureOverlay(void) {
     g_overlay.userInteractionEnabled = YES;
     g_overlay.autoresizingMask = 0x1 | 0x2;
 
-    UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
-    ball.frame = CGRectMake(20, 120, 56, 56);
+    LCJTBallView *ball = [[LCJTBallView alloc] initWithFrame:CGRectMake(20, 120, 56, 56)];
     ball.layer.cornerRadius = 28; ball.layer.masksToBounds = YES;
     ball.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.92];
     ball.layer.borderWidth = 2; ball.layer.borderColor = CGreen().CGColor;
-    [ball setTitle:@"昆" forState:UIControlStateNormal];
-    [ball setTitleColor:CGreen() forState:UIControlStateNormal];
-    ball.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
-    ball.exclusiveTouch = YES;
-    [ball addTarget:g_winDelegate action:@selector(onBallTap:) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_winDelegate
-                                                                        action:@selector(onBallPan:)];
-    [ball addGestureRecognizer:pan];
+    ball.userInteractionEnabled = YES;
+    UILabel *bl = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 56, 56)];
+    bl.text = @"昆"; bl.textAlignment = 1;
+    bl.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    bl.textColor = CGreen(); bl.backgroundColor = UIColor.clearColor;
+    [ball addSubview:bl];
     [g_overlay addSubview:ball];
 
     CGFloat W = 260, H = 250;
@@ -518,7 +546,7 @@ static void LCJTEnsureOverlay(void) {
     [g_overlay addSubview:g_panel];
 
     [vc.view addSubview:g_overlay];
-    [w setHidden:NO];          // 用 hidden=NO 而非 makeKeyAndVisible, 避免抢走游戏的 keyWindow
+    [w makeKeyAndVisible];     // 必须: 否则 window 不参与触摸派发链(球点不动)
     [LCJTUI refresh];
     LCJTLog(@"悬浮层已挂载 scene=%p win=%p bounds=%.0fx%.0f", scene, w,
             w.bounds.size.width, w.bounds.size.height);
