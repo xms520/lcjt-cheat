@@ -315,6 +315,7 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
     [g_status sizeToFit];
 }
 + (void)onToggleTs:(id)b {
+    LCJTLog(@"面板: 点变速");
     g_enableTs = !g_enableTs;
     if (g_enableTs) LCJTCaptureT0();
     UIButton *btn = (UIButton *)b;
@@ -324,6 +325,7 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
     [self refresh];
 }
 + (void)onToggleProbe:(id)b {
+    LCJTLog(@"面板: 点探针");
     LCJTProbeAsync();
     UIButton *btn = (UIButton *)b;
     [btn setTitle:@"v Lua探针" forState:UIControlStateNormal];
@@ -332,6 +334,7 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
     [self refresh];
 }
 + (void)onCycleMul:(id)b {
+    LCJTLog(@"面板: 点倍率");
     static const double muls[] = {2, 3, 5, 8, 1};
     static int idx = 0;
     idx = (idx + 1) % 5; g_tsMul = muls[idx];
@@ -340,7 +343,7 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
                    forState:UIControlStateNormal];
     [self refresh];
 }
-+ (void)onClose:(id)b { g_panelOpen = NO; g_panel.hidden = YES; }
++ (void)onClose:(id)b { LCJTLog(@"面板: 点关闭"); g_panelOpen = NO; g_panel.hidden = YES; }
 + (void)placePanel {
     if (!g_panel || !g_overlay) return;
     CGRect ob = g_overlay.bounds;
@@ -383,6 +386,13 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
 - (void)onCycleMul:(id)s { [LCJTUI onCycleMul:s]; }
 - (void)onClose:(id)s { [LCJTUI onClose:s]; }
 @end
+
+// ★ target 绝不能为 nil: UIControl 事件在 target=nil 时被静默丢弃(不报错不崩溃)
+static id LCJTDelegate(void) {
+    if (!g_winDelegate) g_winDelegate = [[LCJTWinDelegate alloc] init];
+    if (!g_helper)      g_helper      = [[LCJTHelper alloc] init];
+    return g_winDelegate;
+}
 // ==================== 触摸透传容器 ====================
 // 关键: 全屏 UIWindow 若用普通 UIView, 会吞掉所有触摸 → 游戏无法操作。
 // 解决: 重写 hitTest, 只命中子视图(悬浮球/面板), 命中自身则返回 nil
@@ -438,7 +448,7 @@ static UIButton *MkBtn(NSString *t, SEL sel, BOOL on, CGFloat y, CGFloat W) {
     [b setTitle:t forState:UIControlStateNormal];
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     b.backgroundColor = on ? CGreen() : CGray();
-    [b addTarget:g_winDelegate action:sel forControlEvents:UIControlEventTouchUpInside];
+    [b addTarget:LCJTDelegate() action:sel forControlEvents:UIControlEventTouchUpInside];
     return b;
 }
 
@@ -500,6 +510,7 @@ static id LCJTActiveScene(void) {
 //   跨窗口则互不干扰: 我们的 window 在高 windowLevel, 未命中时 hitTest 返回 nil
 //   → UIKit 自动把触摸交给下层(游戏)窗口。
 static void LCJTEnsureOverlay(void) {
+    LCJTDelegate();                       // ★ 必须先实例化 target
     if (g_overlay && g_overlay.window) return;
 
     UIWindow *w = nil;
@@ -552,7 +563,7 @@ static void LCJTEnsureOverlay(void) {
     cb.frame = CGRectMake(W - 36, 6, 28, 28);
     [cb setTitle:@"x" forState:UIControlStateNormal];
     [cb setTitleColor:[UIColor colorWithWhite:0.75 alpha:1] forState:UIControlStateNormal];
-    [cb addTarget:g_winDelegate action:@selector(onClose:) forControlEvents:UIControlEventTouchUpInside];
+    [cb addTarget:LCJTDelegate() action:@selector(onClose:) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:cb];
     [g_panel addSubview:MkBtn(@"o 变速  x2", @selector(onToggleTs:), NO, 38, W)];
     [g_panel addSubview:MkBtn(@"变速倍率: x2", @selector(onCycleMul:), YES, 78, W)];
