@@ -12,7 +12,10 @@
 #import <sys/time.h>
 #import <time.h>
 #import <stdarg.h>
-#include <substrate.h>
+#include "fishhook.h"
+#include <signal.h>
+#include <unistd.h>
+#include <execinfo.h>
 static const uint64_t kTextLo = 0x100005b30ULL;
 static const uint64_t kTextHi = 0x100bbff08ULL;
 static BOOL g_enableTs = NO;
@@ -397,21 +400,37 @@ static void LCJTEnsureOverlay(void) {
     [LCJTUI refresh];
     LCJTLog(@"悬浮窗已挂载");
 }
+
+// ==================== 时间 hook 安装(fishhook, 零副作用) ====================
+// 只重绑定主二进制自己的 __got/__la_symbol_ptr, 不触碰其它镜像 → 无越狱检测、无全局副作用
+static void LCJTFaultTolerantInstall(void) {
+    if (!g_gameBase) LCJTFindGameImage();
+    if (!g_gameBase) { LCJTLog(@"❌ 未找到主二进制, 跳过时间hook"); return; }
+
+    struct rebinding rb[5] = {
+        { "gettimeofday",                  (void *)m_gtod,  (void **)&o_gtod  },
+        { "time",                          (void *)m_time,  (void **)&o_time  },
+        { "clock_gettime",                 (void *)m_cgt,   (void **)&o_cgt   },
+        { "CACurrentMediaTime",            (void *)m_media, (void **)&o_media },
+        { "mach_absolute_time",            (void *)m_mach,  (void **)&o_mach  },
+    };
+    intptr_t slide = 0;
+    uint32_t nimgs = _dyld_image_count();
+    for (uint32_t i = 0; i < nimgs; i++) {
+        if ((uintptr_t)_dyld_get_image_header(i) == g_gameBase) {
+            slide = _dyld_get_image_vmaddr_slide(i); break;
+        }
+    }
+    int r = rebind_symbols_image((void *)g_gameBase, slide, rb, 5);
+    LCJTLog(@"时间hook(fishhook) r=%d slide=%#lx gotod=%p time=%p cgt=%p media=%p mach=%p",
+            r, (unsigned long)slide, o_gtod, o_time, o_cgt, o_media, o_mach);
+}
+
 %ctor {
     @autoreleasepool {
-        LCJTFindGameImage();
-        LCJTLog(@"LCJT v1 加载 base=%p", (void *)g_gameBase);
-        void *h1 = MSFindSymbol(NULL, "_gettimeofday");
-        void *h2 = MSFindSymbol(NULL, "_time");
-        void *h3 = MSFindSymbol(NULL, "_clock_gettime");
-        void *h4 = MSFindSymbol(NULL, "_CACurrentMediaTime");
-        void *h5 = MSFindSymbol(NULL, "_mach_absolute_time");
-        if (h1) MSHookFunction(h1, (void *)m_gtod,  (void **)&o_gtod);
-        if (h2) MSHookFunction(h2, (void *)m_time,  (void **)&o_time);
-        if (h3) MSHookFunction(h3, (void *)m_cgt,   (void **)&o_cgt);
-        if (h4) MSHookFunction(h4, (void *)m_media, (void **)&o_media);
-        if (h5) MSHookFunction(h5, (void *)m_mach,  (void **)&o_mach);
-        LCJTLog(@"时间hook gtod=%p time=%p cgt=%p media=%p mach=%p", h1, h2, h3, h4, h5);
+        LCJTInstallCrashHandler();          // ★ 最先安装
+        LCJTFaultTolerantInstall();
+        LCJTLog(@"LCJT v1.1 加载 base=%p", (void *)g_gameBase);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ LCJTEnsureOverlay(); });
     }
