@@ -293,6 +293,7 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
 + (void)onToggleProbe:(id)b;
 + (void)onCycleMul:(id)b;
 + (void)onClose:(id)b;
++ (void)placePanel;
 @end
 @interface LCJTHelper : NSObject
 - (void)onBallTap:(id)g;
@@ -340,6 +341,25 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
     [self refresh];
 }
 + (void)onClose:(id)b { g_panelOpen = NO; g_panel.hidden = YES; }
++ (void)placePanel {
+    if (!g_panel || !g_overlay) return;
+    CGRect ob = g_overlay.bounds;
+    CGPoint c = g_panel.center;
+    // 面板默认显示在球右侧, 越界则翻到左侧
+    CGPoint bc = CGPointZero;
+    for (UIView *v in g_overlay.subviews) {
+        if ([v isKindOfClass:NSClassFromString(@"LCJTBallView")]) { bc = v.center; break; }
+    }
+    if (bc.x == 0 && bc.y == 0) bc = CGPointMake(48, 148);
+    CGFloat pw = g_panel.bounds.size.width, ph = g_panel.bounds.size.height;
+    CGFloat x = bc.x + 40 + pw / 2;
+    if (x + pw / 2 > ob.size.width - 8) x = bc.x - 40 - pw / 2;
+    if (x - pw / 2 < 8) x = pw / 2 + 8;
+    CGFloat y = bc.y + ph / 2;
+    if (y + ph / 2 > ob.size.height - 8) y = ob.size.height - ph / 2 - 8;
+    if (y - ph / 2 < 8) y = ph / 2 + 8;
+    g_panel.center = CGPointMake(x, y);
+}
 @end
 @implementation LCJTHelper
 - (void)onBallTap:(id)g {
@@ -437,17 +457,20 @@ static CGPoint g_ballStart, g_ballOrigin;
     g_ballOrigin = self.center;
 }
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)e {
-    g_ballMoved = YES;
     UITouch *t = [touches anyObject];
     CGPoint p = [t locationInView:self.superview];
-    self.center = CGPointMake(g_ballOrigin.x + p.x - g_ballStart.x,
-                              g_ballOrigin.y + p.y - g_ballStart.y);
-    if (g_panelOpen) g_panel.center = CGPointMake(self.center.x + 150, self.center.y + 100);
+    CGFloat dx = p.x - g_ballStart.x, dy = p.y - g_ballStart.y;
+    CGFloat dist = dx*dx + dy*dy;
+    if (!g_ballMoved && dist < 100.0) return;   // ★ 10pt 以内不算拖动(消除手抖误判)
+    g_ballMoved = YES;
+    self.center = CGPointMake(g_ballOrigin.x + dx, g_ballOrigin.y + dy);
+    if (g_panelOpen) [LCJTUI placePanel];
 }
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)e {
-    if (!g_ballMoved) {
+    if (!g_ballMoved) {                          // ★ 是点击 → 切换面板
         g_panelOpen = !g_panelOpen;
         g_panel.hidden = !g_panelOpen;
+        if (g_panelOpen) [LCJTUI placePanel];
         [LCJTUI refresh];
     }
 }
