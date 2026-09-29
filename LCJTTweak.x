@@ -401,6 +401,30 @@ static void LCJTEnsureOverlay(void) {
     LCJTLog(@"悬浮窗已挂载");
 }
 
+
+// ==================== 崩溃捕获(定位崩点) ====================
+static void LCJTCrashHandler(int sig) {
+    void *bt[48];
+    int n = backtrace(bt, 48);
+    NSString *p = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
+                   stringByAppendingPathComponent:@"lcjt_crash.txt"];
+    FILE *f = fopen(p.UTF8String, "a");
+    if (f) {
+        fprintf(f, "=== SIGNAL %d ===\n", sig);
+        backtrace_symbols_fd(bt, n, fileno(f));
+        fclose(f);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static void LCJTInstallCrashHandler(void) {
+    signal(SIGSEGV, LCJTCrashHandler);
+    signal(SIGBUS,  LCJTCrashHandler);
+    signal(SIGABRT, LCJTCrashHandler);
+    signal(SIGILL,  LCJTCrashHandler);
+    signal(SIGTRAP, LCJTCrashHandler);
+}
+
 // ==================== 时间 hook 安装(fishhook, 零副作用) ====================
 // 只重绑定主二进制自己的 __got/__la_symbol_ptr, 不触碰其它镜像 → 无越狱检测、无全局副作用
 static void LCJTFaultTolerantInstall(void) {
