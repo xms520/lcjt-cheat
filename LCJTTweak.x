@@ -69,12 +69,21 @@ static ft_cgt o_cgt = NULL;
 static ft_media o_media = NULL;
 static ft_mach o_mach = NULL;
 static double g_t0_us = 0, g_t0_media = 0, g_t0_mach = 0;
+// ---- clock / std::chrono (日志实证: 游戏用 clock + steady_clock 取时间) ----
+typedef clock_t (*ft_clock)(void);
+typedef long long (*ft_steady)(void);
+static ft_clock  o_clock = NULL;
+static ft_steady o_steady = NULL;
+static double g_t0_clock = 0, g_t0_steady = 0;
+
 static void LCJTCaptureT0(void) {
     struct timeval tv = {0};
     if (o_gtod) o_gtod(&tv, NULL);
     g_t0_us = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
-    if (o_media) g_t0_media = o_media();
-    if (o_mach)  g_t0_mach  = (double)o_mach();
+    if (o_media)  g_t0_media  = o_media();
+    if (o_mach)   g_t0_mach   = (double)o_mach();
+    if (o_clock)  g_t0_clock  = (double)o_clock();
+    if (o_steady) g_t0_steady = (double)o_steady();
     g_tsApplied = 0;
     LCJTLog(@"变速开启 x%.1f t0=%f", g_tsMul, g_t0_us);
 }
@@ -132,6 +141,27 @@ static uint64_t m_mach(void) {
     }
     return r;
 }
+
+static clock_t m_clock(void) {
+    clock_t r = o_clock();
+    if (g_enableTs && LCJTIsGameCode(__builtin_return_address(0))) {
+        double v = (double)r * g_tsMul + g_t0_clock * (1.0 - g_tsMul);
+        r = (clock_t)(v > 0 ? v : 0);
+        g_tsApplied++;
+    }
+    return r;
+}
+// std::chrono::steady_clock::now() (arm64: x0 返回 int64 纳秒)
+static long long m_steady(void) {
+    long long r = o_steady();
+    if (g_enableTs && LCJTIsGameCode(__builtin_return_address(0))) {
+        double v = (double)r * g_tsMul + g_t0_steady * (1.0 - g_tsMul);
+        r = (long long)(v > 0 ? v : 0);
+        g_tsApplied++;
+    }
+    return r;
+}
+
 static void LCJTScanBuf(uint8_t *buf, size_t got, FILE *out,
                         uint64_t *pStr, uint64_t *pLJ, NSMutableArray *samples) {
     size_t i = 0;
@@ -337,6 +367,26 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
 // 关键: 全屏 UIWindow 若用普通 UIView, 会吞掉所有触摸 → 游戏无法操作。
 // 解决: 重写 hitTest, 只命中子视图(悬浮球/面板), 命中自身则返回 nil
 //       → 空白区域的触摸透传到下层(游戏)窗口
+// ★ 关键: 透传必须实现在【UIWindow 自身】, 只加在子视图上无效!
+//   原因: UIWindow.hitTest 若返回自身, 整窗会吞掉所有触摸(游戏也点不了)。
+@interface LCJTPassThroughWindow : UIWindow
+@end
+@implementation LCJTPassThroughWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit == self) return nil;                        // 空白区 → 透传下层窗口
+    if (hit == self.rootViewController.view) return nil;
+    return hit;                                          // 只命中真实控件
+}
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    for (UIView *v in self.subviews) {
+        if (!v.hidden && v.alpha > 0.01 &&
+            [v pointInside:[v convertPoint:point fromView:self] withEvent:event]) return YES;
+    }
+    return NO;
+}
+@end
+
 @interface LCJTPassThroughView : UIView
 @end
 @implementation LCJTPassThroughView
@@ -400,16 +450,16 @@ static void LCJTEnsureOverlay(void) {
     id scene = LCJTActiveScene();
     if (scene) {
         SEL sel = NSSelectorFromString(@"initWithWindowScene:");
-        if ([UIWindow instancesRespondToSelector:sel]) {
-            w = ((id (*)(id, SEL, id))objc_msgSend)([UIWindow alloc], sel, scene);
+        if ([LCJTPassThroughWindow instancesRespondToSelector:sel]) {
+            w = ((id (*)(id, SEL, id))objc_msgSend)([LCJTPassThroughWindow alloc], sel, scene);
         }
     }
-    if (!w) w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    if (!w) w = [[LCJTPassThroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     if (!w) { LCJTLog(@"⚠️ 无法创建悬浮窗口"); return; }
 
     w.windowLevel = UIWindowLevelAlert + 1;   // 盖在游戏之上
     w.backgroundColor = UIColor.clearColor;
-    w.hidden = NO;
+    w.hidden = YES;   // 稍后统一 setHidden:NO
 
     // 透传容器: 空白区域不拦截 → 触摸落到下层游戏窗口
     UIViewController *vc = [[UIViewController alloc] init];
@@ -468,7 +518,7 @@ static void LCJTEnsureOverlay(void) {
     [g_overlay addSubview:g_panel];
 
     [vc.view addSubview:g_overlay];
-    [w makeKeyAndVisible];
+    [w setHidden:NO];          // 用 hidden=NO 而非 makeKeyAndVisible, 避免抢走游戏的 keyWindow
     [LCJTUI refresh];
     LCJTLog(@"悬浮层已挂载 scene=%p win=%p bounds=%.0fx%.0f", scene, w,
             w.bounds.size.width, w.bounds.size.height);
@@ -504,12 +554,14 @@ static void LCJTInstallCrashHandler(void) {
 static void LCJTFaultTolerantInstall(void) {
     if (!g_gameBase) LCJTFindGameImage();
     if (!g_gameBase) { LCJTLog(@"未找到主二进制, 跳过时间hook"); return; }
-    struct rebinding rb[5] = {
-        { "gettimeofday",       (void *)m_gtod,  (void **)&o_gtod  },
-        { "time",               (void *)m_time,  (void **)&o_time  },
-        { "clock_gettime",      (void *)m_cgt,   (void **)&o_cgt   },
-        { "CACurrentMediaTime", (void *)m_media, (void **)&o_media },
-        { "mach_absolute_time", (void *)m_mach,  (void **)&o_mach  },
+    struct rebinding rb[7] = {
+        { "gettimeofday",                (void *)m_gtod,   (void **)&o_gtod   },
+        { "time",                        (void *)m_time,   (void **)&o_time   },
+        { "clock_gettime",               (void *)m_cgt,    (void **)&o_cgt    },
+        { "CACurrentMediaTime",          (void *)m_media,  (void **)&o_media  },
+        { "mach_absolute_time",          (void *)m_mach,   (void **)&o_mach   },
+        { "clock",                       (void *)m_clock,  (void **)&o_clock  },
+        { "_ZNSt3__16chrono12steady_clock3nowEv", (void *)m_steady, (void **)&o_steady },
     };
     intptr_t slide = 0;
     uint32_t nimgs = _dyld_image_count();
@@ -518,9 +570,9 @@ static void LCJTFaultTolerantInstall(void) {
             slide = _dyld_get_image_vmaddr_slide(i); break;
         }
     }
-    int r = rebind_symbols_image((void *)g_gameBase, slide, rb, 5);
-    LCJTLog(@"时间hook(fishhook) r=%d slide=%#lx gtod=%p time=%p cgt=%p media=%p mach=%p",
-            r, (unsigned long)slide, o_gtod, o_time, o_cgt, o_media, o_mach);
+    int r = rebind_symbols_image((void *)g_gameBase, slide, rb, 7);
+    LCJTLog(@"时间hook r=%d slide=%#lx gtod=%p time=%p cgt=%p media=%p mach=%p clock=%p steady=%p",
+            r, (unsigned long)slide, o_gtod, o_time, o_cgt, o_media, o_mach, o_clock, o_steady);
 }
 
 %ctor {
