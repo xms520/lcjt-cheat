@@ -9,28 +9,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ldid + dpkg
+        run: |
+          brew install ldid dpkg 2>/dev/null || brew install ldid
+          which ldid || (curl -L https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64 -o /usr/local/bin/ldid && chmod +x /usr/local/bin/ldid)
+          ldid -h 2>&1 | head -2 || true
+
       - name: Setup Theos
         run: |
           export THEOS=$HOME/theos
           git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
-          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks 2>/dev/null || true
+          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "$THEOS/bin" >> $GITHUB_PATH
-          sudo xcrun --sdk iphoneos --show-sdk-path || true
-
-      - name: Pick SDK
-        run: |
-          ls $THEOS/sdks || true
-          SDK=$(ls $THEOS/sdks | grep -E '^iPhoneOS1[4-9]' | sort -V | tail -1)
-          echo "Using SDK: $SDK"
-          echo "THEOS_SDK=$SDK" >> $GITHUB_ENV
+          ls $THEOS/sdks
 
       - name: Build
         run: |
           make clean || true
           make package THEOS_PACKAGE_SCHEME=rootless SIDELOADING=1 FINALPACKAGE=1 2>&1 | tee build.log
-          echo "--- artifacts ---"
-          find . -name "*.deb" -o -name "*.dylib" | head
+          echo "=== deb ==="
+          ls -la packages/ 2>/dev/null || true
 
       - name: Upload
         uses: actions/upload-artifact@v4
