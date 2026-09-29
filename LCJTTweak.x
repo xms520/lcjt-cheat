@@ -486,8 +486,8 @@ static void LCJTEnsureOverlay(void) {
         if (scene) w.windowScene = (UIWindowScene *)scene;   // ★ 显式绑定(必须!)
     }
     if (!w) { LCJTLog(@"无法创建悬浮窗口"); return; }
-    LCJTLog(@"窗口 scene绑定=%d (scene=%p w.windowScene=%p)",
-            (scene != nil), scene, (void *)w.windowScene);
+    LCJTLog(@"窗口 scene绑定=%d scene=%p ws=%p", (scene != nil),
+            (void *)(__bridge void *)scene, (__bridge void *)w.windowScene);
     w.windowLevel = 100000;   // 远高于游戏窗口
     w.backgroundColor = UIColor.clearColor;
     w.hidden = YES;   // 稍后统一 setHidden:NO
