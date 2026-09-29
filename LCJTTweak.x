@@ -288,6 +288,7 @@ static BOOL g_panelOpen = NO;
 static UIColor *CGreen(void) { return [UIColor colorWithRed:0.18 green:0.78 blue:0.35 alpha:1]; }
 static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
 static void LCJTDumpHotUpdateAsync(void);
+static void LCJTAnalyzeCombatAsync(void);
 
 @interface LCJTUI : NSObject
 + (void)refresh;
@@ -297,6 +298,7 @@ static void LCJTDumpHotUpdateAsync(void);
 + (void)onClose:(id)b;
 + (void)placePanel;
 + (void)onScanFiles:(id)b;
++ (void)onAnalyze:(id)b;
 @end
 @interface LCJTHelper : NSObject
 - (void)onBallTap:(id)g;
@@ -347,6 +349,12 @@ static void LCJTDumpHotUpdateAsync(void);
     [self refresh];
 }
 + (void)onClose:(id)b { LCJTLog(@"面板: 点关闭"); g_panelOpen = NO; g_panel.hidden = YES; }
++ (void)onAnalyze:(id)b {
+    LCJTLog(@"面板: 点源码摘要");
+    g_note = @"分析战斗源码…";
+    [self refresh];
+    LCJTAnalyzeCombatAsync();
+}
 + (void)onScanFiles:(id)b {
     LCJTLog(@"面板: 点扫描热更");
     g_note = @"扫描热更文件…";
@@ -395,6 +403,7 @@ static void LCJTDumpHotUpdateAsync(void);
 - (void)onCycleMul:(id)s { [LCJTUI onCycleMul:s]; }
 - (void)onClose:(id)s { [LCJTUI onClose:s]; }
 - (void)onScanFiles:(id)s { [LCJTUI onScanFiles:s]; }
+- (void)onAnalyze:(id)s { [LCJTUI onAnalyze:s]; }
 @end
 
 // ★ target 绝不能为 nil: UIControl 事件在 target=nil 时被静默丢弃(不报错不崩溃)
@@ -511,6 +520,93 @@ static void LCJTDumpHotUpdateAsync(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ LCJTDumpHotUpdate(); });
 }
 
+
+// ==================== 战斗源码摘要器 ====================
+// 读取 Documents/files/ 下的 .lua 明文, 提取与
+// 移速/攻速/血量/伤害/死亡/无敌 相关的代码行 → 单文件回传(体积小)
+static BOOL LCJTLineHit(NSString *ln) {
+    static NSArray *kws = nil;
+    if (!kws) kws = @[@"speed", @"Speed", @"move", @"Move", @"walkSpeed", @"runSpeed",
+                      @"attack", @"Attack", @"atkSpeed", @"interval", @"Interval",
+                      @"cd ", @"CD ", @"coolDown", @"cool", @"fps", @"frameRate",
+                      @"hp", @"Hp", @"HP", @"blood", @"Blood", @"health", @"Health",
+                      @"hurt", @"Hurt", @"damage", @"Damage", @"harm",
+                      @"die", @"Die", @"dead", @"Dead", @"Death", @"death",
+                      @"invinc", @"Invinc", @"immune", @"Immune", @"god", @"God",
+                      @"无敌", @"免伤", @"免疫", @"速度", @"攻速", @"血量", @"伤害", @"死亡", @"间隔"];
+    for (NSString *k in kws) if ([ln containsString:k]) return YES;
+    return NO;
+}
+
+static void LCJTAnalyzeCombat(void) {
+    @autoreleasepool {
+        NSString *root = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/files"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSMutableString *rep = [NSMutableString string];
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+        int nfile = 0, nline = 0;
+        while (stack.count && nfile < 4000) {
+            NSString *dir = stack.lastObject; [stack removeLastObject];
+            for (NSString *it in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+                NSString *full = [dir stringByAppendingPathComponent:it];
+                BOOL isDir = NO;
+                if (![fm fileExistsAtPath:full isDirectory:&isDir]) continue;
+                if (isDir) { [stack addObject:full]; continue; }
+                if (![full.pathExtension.lowercaseString isEqualToString:@"lua"]) continue;
+                NSString *b = full.lastPathComponent.lowercaseString;
+                // 优先关键文件
+                BOOL key = ([b containsString:@"gameactor"] || [b containsString:@"moveable"] ||
+                            [b containsString:@"attack"] || [b containsString:@"skill"] ||
+                            [b containsString:@"buff"] || [b containsString:@"damage"] ||
+                            [b containsString:@"die"] || [b containsString:@"dead"] ||
+                            [b containsString:@"constant"] || [b containsString:@"setup"] ||
+                            [b containsString:@"magicinfo"] || [b containsString:@"main.lua"] ||
+                            [b containsString:@"state"] || [b containsString:@"hud"]);
+                if (!key) continue;
+                NSString *txt = [NSString stringWithContentsOfFile:full encoding:NSUTF8StringEncoding error:nil];
+                if (!txt) continue;
+                nfile++;
+                [rep appendFormat:@"\n\n===== %@ (%lu B) =====\n", full, (unsigned long)txt.length];
+                NSArray *lines = [txt componentsSeparatedByString:@"\n"];
+                for (NSUInteger i = 0; i < lines.count; i++) {
+                    NSString *ln = (NSString *)[lines objectAtIndex:i];
+                    if ([ln containsString:@"速度"] || [ln containsString:@"攻速"] ||
+                        [ln containsString:@"血量"] || [ln containsString:@"伤害"] ||
+                        [ln containsString:@"无敌"] || [ln containsString:@"免伤"] ||
+                        [ln containsString:@"间隔"] || [ln containsString:@"死亡"] ||
+                        LCJTLineHit(ln)) {
+                        [rep appendFormat:@"%5lu| %@\n", (unsigned long)(i+1), ln];
+                        nline++;
+                    }
+                }
+            }
+        }
+        // 额外: 完整导出几个体积小但最关键的文件
+        NSArray *must = @[@"actor/gameActor.lua", @"actor/gameActorMoveable.lua",
+                          @"actor/gameActorStatePlayerAttack.lua", @"actor/gameActorStateMoveBase.lua",
+                          @"actor/gameActorStateMonsterDie.lua", @"skill/skillManager.lua",
+                          @"config/ConstantConfig.lua", @"actor/gameActorStatePlayerDie.lua"];
+        for (NSString *rel in must) {
+            NSString *f1 = [root stringByAppendingPathComponent:
+                            [@"mod_fgcq/stab/scripts" stringByAppendingPathComponent:rel]];
+            NSString *f2 = [root stringByAppendingPathComponent:
+                            [@"mod_fgcq/cqwl_218435/scripts" stringByAppendingPathComponent:rel]];
+            for (NSString *f in @[f1, f2]) {
+                NSString *t = [NSString stringWithContentsOfFile:f encoding:NSUTF8StringEncoding error:nil];
+                if (!t) continue;
+                [rep appendFormat:@"\n\n########## FULL %@ (%lu B) ##########\n%@\n", f, (unsigned long)t.length, t];
+            }
+        }
+        NSString *out = [LCJTDocPath() stringByAppendingPathComponent:@"lcjt_战斗源码摘要.txt"];
+        [rep writeToFile:out atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        g_note = [NSString stringWithFormat:@"源码摘要: %d文件 %d行", nfile, nline];
+        LCJTLog(@"战斗源码摘要完成: 文件%d 命中行%d -> %@", nfile, nline, out);
+    }
+}
+static void LCJTAnalyzeCombatAsync(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ LCJTAnalyzeCombat(); });
+}
+
 // ==================== 自绘悬浮球 ====================
 // 不用 UIButton: UIControl 事件链依赖 window 状态, 自绘 touches 更可靠
 static BOOL g_ballMoved = NO;
@@ -611,7 +707,7 @@ static void LCJTEnsureOverlay(void) {
     [ball addSubview:bl];
     [g_overlay addSubview:ball];
 
-    CGFloat W = 260, H = 276;
+    CGFloat W = 260, H = 308;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, H)];
     g_panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
     g_panel.layer.cornerRadius = 14; g_panel.layer.masksToBounds = YES;
@@ -628,12 +724,13 @@ static void LCJTEnsureOverlay(void) {
     [g_panel addSubview:MkBtn(@"变速倍率: x2", @selector(onCycleMul:), YES, 78, W)];
     [g_panel addSubview:MkBtn(@"Lua探针(导出游戏符号)", @selector(onToggleProbe:), NO, 118, W)];
     [g_panel addSubview:MkBtn(@"扫描热更(dump Lua源码)", @selector(onScanFiles:), NO, 152, W)];
-    UILabel *hint = MkLabel(CGRectMake(12, 190, W - 24, 28),
+    [g_panel addSubview:MkBtn(@"分析战斗源码(出摘要)", @selector(onAnalyze:), NO, 186, W)];
+    UILabel *hint = MkLabel(CGRectMake(12, 224, W - 24, 28),
                             @"秒杀/无敌/移速/攻速 需探针结果后接入", 9.5,
                             [UIColor colorWithWhite:0.62 alpha:1]);
     hint.numberOfLines = 2;
     [g_panel addSubview:hint];
-    g_status = MkLabel(CGRectMake(12, 214, W - 24, 54), @"", 10, [UIColor colorWithWhite:0.85 alpha:1]);
+    g_status = MkLabel(CGRectMake(12, 246, W - 24, 54), @"", 10, [UIColor colorWithWhite:0.85 alpha:1]);
     g_status.numberOfLines = 4;
     [g_panel addSubview:g_status];
     g_panel.hidden = YES;
