@@ -151,6 +151,7 @@ static void LCJTScanBuf(uint8_t *buf, size_t got, FILE *out,
         } else i++;
     }
 }
+static void LCJTDumpAllASCII(FILE *out);
 static void LCJTProbeLua(void) {
     LCJTLog(@"=== Lua 探针开始 ===");
     g_note = @"探针运行中";
