@@ -13,6 +13,7 @@
 #import <time.h>
 #import <stdarg.h>
 #include "fishhook.h"
+#import <objc/message.h>
 #include <signal.h>
 #include <unistd.h>
 #include <execinfo.h>
@@ -370,64 +371,69 @@ static UIButton *MkBtn(NSString *t, SEL sel, BOOL on, CGFloat y, CGFloat W) {
     [b addTarget:g_winDelegate action:sel forControlEvents:UIControlEventTouchUpInside];
     return b;
 }
-// 找宿主窗口: 优先 UIScene 架构下的 keyWindow(游戏自己的窗口)
-static UIWindow *LCJTFindHostWindow(void) {
-    // iOS 13+ UIScene
+// 找当前活跃的 UIWindowScene (iOS 13+ 必须绑定 windowScene, 否则触摸路由异常)
+static id LCJTActiveScene(void) {
     if (@available(iOS 13.0, *)) {
         id app = [UIApplication sharedApplication];
         if ([app respondsToSelector:@selector(connectedScenes)]) {
             NSSet *scenes = [app connectedScenes];
             for (id sc in scenes) {
-                if ([sc respondsToSelector:@selector(activationState)] && [sc activationState] != 0) {
-                    if ([sc respondsToSelector:@selector(windows)]) {
-                        NSArray *ws = [sc windows];
-                        for (UIWindow *w in ws) {
-                            if (w.isKeyWindow) return w;
-                        }
-                        if (ws.count) return ws.firstObject;
-                    }
-                }
+                if ([sc respondsToSelector:@selector(activationState)] && [sc activationState] != 0)
+                    return sc;
             }
-        }
-    }
-    // 兜底: 传统 keyWindow
-    id app = [UIApplication sharedApplication];
-    if ([app respondsToSelector:@selector(keyWindow)]) {
-        UIWindow *kw = [app keyWindow];
-        if (kw) return kw;
-    }
-    if ([app respondsToSelector:@selector(delegate)]) {
-        id d = [app delegate];
-        if ([d respondsToSelector:@selector(window)]) {
-            UIWindow *dw = [d window];
-            if (dw) return dw;
+            for (id sc in scenes) return sc;
         }
     }
     return nil;
 }
 
-// 挂载悬浮层(挂到游戏窗口顶层, 不建独立 UIWindow → 避免 iOS26 UIScene 触摸路由问题)
+// 挂载悬浮层
+// ★ 必须用【独立 UIWindow】而不是挂到游戏窗口:
+//   游戏在自身窗口装了全屏 UIPanGestureRecognizer(cancelsTouchesInView=YES),
+//   手势识别器能看到子视图的触摸 → 悬浮球一碰就被游戏手势取消。
+//   跨窗口则互不干扰: 我们的 window 在高 windowLevel, 未命中时 hitTest 返回 nil
+//   → UIKit 自动把触摸交给下层(游戏)窗口。
 static void LCJTEnsureOverlay(void) {
-    if (g_overlay && g_overlay.superview) return;
+    if (g_overlay && g_overlay.window) return;
 
-    UIWindow *host = LCJTFindHostWindow();
-    if (!host) { LCJTLog(@"⚠️ 未找到宿主窗口, 稍后重试"); return; }
-    g_hostWin = host;
+    UIWindow *w = nil;
+    id scene = LCJTActiveScene();
+    if (scene) {
+        SEL sel = NSSelectorFromString(@"initWithWindowScene:");
+        if ([UIWindow instancesRespondToSelector:sel]) {
+            w = ((id (*)(id, SEL, id))objc_msgSend)([UIWindow alloc], sel, scene);
+        }
+    }
+    if (!w) w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    if (!w) { LCJTLog(@"⚠️ 无法创建悬浮窗口"); return; }
 
-    if (!g_overlay) g_overlay = [[LCJTPassThroughView alloc] initWithFrame:host.bounds];
-    g_overlay.frame = host.bounds;
+    w.windowLevel = UIWindowLevelAlert + 1;   // 盖在游戏之上
+    w.backgroundColor = UIColor.clearColor;
+    w.hidden = NO;
+
+    // 透传容器: 空白区域不拦截 → 触摸落到下层游戏窗口
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.view = [[LCJTPassThroughView alloc] initWithFrame:w.bounds];
+    vc.view.backgroundColor = UIColor.clearColor;
+    vc.view.userInteractionEnabled = YES;
+    w.rootViewController = vc;
+    g_hostWin = w;
+
+    if (!g_overlay) g_overlay = [[LCJTPassThroughView alloc] initWithFrame:w.bounds];
+    g_overlay.frame = w.bounds;
     g_overlay.backgroundColor = UIColor.clearColor;
     g_overlay.userInteractionEnabled = YES;
-    g_overlay.autoresizingMask = 0x1 | 0x2;   // FlexibleWidth|FlexibleHeight
+    g_overlay.autoresizingMask = 0x1 | 0x2;
 
     UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
-    ball.frame = CGRectMake(14, 130, 52, 52);
-    ball.layer.cornerRadius = 26; ball.layer.masksToBounds = YES;
+    ball.frame = CGRectMake(20, 120, 56, 56);
+    ball.layer.cornerRadius = 28; ball.layer.masksToBounds = YES;
     ball.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.92];
     ball.layer.borderWidth = 2; ball.layer.borderColor = CGreen().CGColor;
     [ball setTitle:@"昆" forState:UIControlStateNormal];
     [ball setTitleColor:CGreen() forState:UIControlStateNormal];
-    ball.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+    ball.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    ball.exclusiveTouch = YES;
     [ball addTarget:g_winDelegate action:@selector(onBallTap:) forControlEvents:UIControlEventTouchUpInside];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_winDelegate
                                                                         action:@selector(onBallPan:)];
@@ -439,7 +445,7 @@ static void LCJTEnsureOverlay(void) {
     g_panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
     g_panel.layer.cornerRadius = 14; g_panel.layer.masksToBounds = YES;
     g_panel.layer.borderWidth = 1; g_panel.layer.borderColor = CGreen().CGColor;
-    g_panel.center = CGPointMake(host.bounds.size.width - 150, 200);
+    g_panel.center = CGPointMake(w.bounds.size.width - 150, 200);
     [g_panel addSubview:MkLabel(CGRectMake(12, 8, W - 48, 22), @"昆哥儿科技 · 龙城军团", 14, CGreen())];
     UIButton *cb = [UIButton buttonWithType:UIButtonTypeCustom];
     cb.frame = CGRectMake(W - 36, 6, 28, 28);
@@ -461,14 +467,16 @@ static void LCJTEnsureOverlay(void) {
     g_panel.hidden = YES;
     [g_overlay addSubview:g_panel];
 
-    [host addSubview:g_overlay];
-    [host bringSubviewToFront:g_overlay];
+    [vc.view addSubview:g_overlay];
+    [w makeKeyAndVisible];
     [LCJTUI refresh];
-    LCJTLog(@"悬浮层已挂载到游戏窗口 %p (bounds=%.0fx%.0f)", host,
-            host.bounds.size.width, host.bounds.size.height);
+    LCJTLog(@"悬浮层已挂载 scene=%p win=%p bounds=%.0fx%.0f", scene, w,
+            w.bounds.size.width, w.bounds.size.height);
 }
 
 
+static void LCJTCrashHandler(int sig);
+static void LCJTInstallCrashHandler(void);
 // ==================== 崩溃捕获 ====================
 static void LCJTCrashHandler(int sig) {
     void *bt[48];
@@ -492,7 +500,7 @@ static void LCJTInstallCrashHandler(void) {
     signal(SIGTRAP, LCJTCrashHandler);
 }
 
-// ==================== 时间 hook 安装 (fishhook, 零外部依赖) ====================
+// ==================== 时间 hook 安装 (fishhook) ====================
 static void LCJTFaultTolerantInstall(void) {
     if (!g_gameBase) LCJTFindGameImage();
     if (!g_gameBase) { LCJTLog(@"未找到主二进制, 跳过时间hook"); return; }
