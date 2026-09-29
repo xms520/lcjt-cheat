@@ -1,0 +1,9 @@
+Package: com.kunger.lcjt
+Name: 龙城军团助手
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 龙城军团(com.lcjt.ios) 悬浮窗助手 - 精确时间变速 + Lua 内存探针
+Maintainer: kunger
+Author: kunger
+Section: Tweaks
+Depends: mobilesubstrate

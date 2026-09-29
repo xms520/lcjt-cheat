@@ -1,0 +1,43 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          export THEOS=$HOME/theos
+          git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
+          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks 2>/dev/null || true
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
+          sudo xcrun --sdk iphoneos --show-sdk-path || true
+
+      - name: Pick SDK
+        run: |
+          ls $THEOS/sdks || true
+          SDK=$(ls $THEOS/sdks | grep -E '^iPhoneOS1[4-9]' | sort -V | tail -1)
+          echo "Using SDK: $SDK"
+          echo "THEOS_SDK=$SDK" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          make clean || true
+          make package THEOS_PACKAGE_SCHEME=rootless SIDELOADING=1 FINALPACKAGE=1 2>&1 | tee build.log
+          echo "--- artifacts ---"
+          find . -name "*.deb" -o -name "*.dylib" | head
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcjt-package
+          path: |
+            packages/*.deb
+            .theos/obj/**/*.dylib
+            build.log
+          if-no-files-found: warn
