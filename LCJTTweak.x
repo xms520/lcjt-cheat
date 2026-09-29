@@ -287,6 +287,8 @@ static UILabel *g_status = nil;
 static BOOL g_panelOpen = NO;
 static UIColor *CGreen(void) { return [UIColor colorWithRed:0.18 green:0.78 blue:0.35 alpha:1]; }
 static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
+static void LCJTDumpHotUpdateAsync(void);
+
 @interface LCJTUI : NSObject
 + (void)refresh;
 + (void)onToggleTs:(id)b;
@@ -294,6 +296,7 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
 + (void)onCycleMul:(id)b;
 + (void)onClose:(id)b;
 + (void)placePanel;
++ (void)onScanFiles:(id)b;
 @end
 @interface LCJTHelper : NSObject
 - (void)onBallTap:(id)g;
@@ -344,6 +347,12 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
     [self refresh];
 }
 + (void)onClose:(id)b { LCJTLog(@"面板: 点关闭"); g_panelOpen = NO; g_panel.hidden = YES; }
++ (void)onScanFiles:(id)b {
+    LCJTLog(@"面板: 点扫描热更");
+    g_note = @"扫描热更文件…";
+    [self refresh];
+    LCJTDumpHotUpdateAsync();
+}
 + (void)placePanel {
     if (!g_panel || !g_overlay) return;
     CGRect ob = g_overlay.bounds;
@@ -385,6 +394,7 @@ static UIColor *CGray(void)  { return [UIColor colorWithWhite:0.30 alpha:1]; }
 - (void)onToggleProbe:(id)s { [LCJTUI onToggleProbe:s]; }
 - (void)onCycleMul:(id)s { [LCJTUI onCycleMul:s]; }
 - (void)onClose:(id)s { [LCJTUI onClose:s]; }
+- (void)onScanFiles:(id)s { [LCJTUI onScanFiles:s]; }
 @end
 
 // ★ target 绝不能为 nil: UIControl 事件在 target=nil 时被静默丢弃(不报错不崩溃)
@@ -450,6 +460,55 @@ static UIButton *MkBtn(NSString *t, SEL sel, BOOL on, CGFloat y, CGFloat W) {
     b.backgroundColor = on ? CGreen() : CGray();
     [b addTarget:LCJTDelegate() action:sel forControlEvents:UIControlEventTouchUpInside];
     return b;
+}
+
+
+// ==================== 热更文件扫描 (明文 Lua 源码在此) ====================
+// 依据探针导出: gm_cache/ / gm_assets / HotUpdateGMAssets / GetGMCachePath
+static void LCJTDumpHotUpdate(void) {
+    @autoreleasepool {
+        NSString *home = NSHomeDirectory();
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSMutableString *idx = [NSMutableString stringWithString:@"# 路径\t字节数\n"];
+        NSString *outDir = [LCJTDocPath() stringByAppendingPathComponent:@"lcjt_lua"];
+        [fm createDirectoryAtPath:outDir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:home];
+        int ndir = 0, found = 0, copied = 0;
+        while (stack.count > 0 && ndir < 30000) {
+            NSString *dir = stack.lastObject; [stack removeLastObject]; ndir++;
+            if ([dir containsString:@"/lcjt_lua"]) continue;
+            NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+            for (NSString *it in items) {
+                NSString *full = [dir stringByAppendingPathComponent:it];
+                BOOL isDir = NO;
+                if (![fm fileExistsAtPath:full isDirectory:&isDir]) continue;
+                if (isDir) { [stack addObject:full]; continue; }
+                NSString *ext = full.pathExtension.lowercaseString;
+                if ([ext isEqualToString:@"lua"] || [ext isEqualToString:@"luac"] ||
+                    [ext isEqualToString:@"manifest"]) {
+                    NSDictionary *at = [fm attributesOfItemAtPath:full error:nil];
+                    unsigned long long sz = [[at objectForKey:NSFileSize] unsignedLongLongValue];
+                    found++;
+                    [idx appendFormat:@"%@\t%llu\n", full, sz];
+                    if (sz > 0 && sz < 4000000 && copied < 4000) {
+                        NSData *d = [NSData dataWithContentsOfFile:full];
+                        if (d) {
+                            NSString *dest = [outDir stringByAppendingPathComponent:
+                                              [NSString stringWithFormat:@"%04d_%@", found, it]];
+                            if ([d writeToFile:dest atomically:YES]) copied++;
+                        }
+                    }
+                }
+            }
+        }
+        NSString *ip = [LCJTDocPath() stringByAppendingPathComponent:@"lcjt_files.txt"];
+        [idx writeToFile:ip atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        g_note = [NSString stringWithFormat:@"热更扫描: 命中%d 复制%d", found, copied];
+        LCJTLog(@"热更扫描完成: 遍历%d目录 命中%d 复制%d -> %@ (目录 %@)", ndir, found, copied, ip, outDir);
+    }
+}
+static void LCJTDumpHotUpdateAsync(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ LCJTDumpHotUpdate(); });
 }
 
 // ==================== 自绘悬浮球 ====================
@@ -552,7 +611,7 @@ static void LCJTEnsureOverlay(void) {
     [ball addSubview:bl];
     [g_overlay addSubview:ball];
 
-    CGFloat W = 260, H = 250;
+    CGFloat W = 260, H = 276;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, H)];
     g_panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
     g_panel.layer.cornerRadius = 14; g_panel.layer.masksToBounds = YES;
@@ -568,12 +627,13 @@ static void LCJTEnsureOverlay(void) {
     [g_panel addSubview:MkBtn(@"o 变速  x2", @selector(onToggleTs:), NO, 38, W)];
     [g_panel addSubview:MkBtn(@"变速倍率: x2", @selector(onCycleMul:), YES, 78, W)];
     [g_panel addSubview:MkBtn(@"Lua探针(导出游戏符号)", @selector(onToggleProbe:), NO, 118, W)];
-    UILabel *hint = MkLabel(CGRectMake(12, 158, W - 24, 28),
+    [g_panel addSubview:MkBtn(@"扫描热更(dump Lua源码)", @selector(onScanFiles:), NO, 152, W)];
+    UILabel *hint = MkLabel(CGRectMake(12, 190, W - 24, 28),
                             @"秒杀/无敌/移速/攻速 需探针结果后接入", 9.5,
                             [UIColor colorWithWhite:0.62 alpha:1]);
     hint.numberOfLines = 2;
     [g_panel addSubview:hint];
-    g_status = MkLabel(CGRectMake(12, 190, W - 24, 54), @"", 10, [UIColor colorWithWhite:0.85 alpha:1]);
+    g_status = MkLabel(CGRectMake(12, 214, W - 24, 54), @"", 10, [UIColor colorWithWhite:0.85 alpha:1]);
     g_status.numberOfLines = 4;
     [g_panel addSubview:g_status];
     g_panel.hidden = YES;
