@@ -521,6 +521,22 @@ static void LCJTDumpHotUpdateAsync(void) {
 }
 
 
+
+// 健壮读文本: UTF-8 -> GBK(0x0632) -> 按字节 latin1 (永不返回 nil)
+static NSString *LCJTReadText(NSString *path) {
+    NSData *d = [NSData dataWithContentsOfFile:path];
+    if (!d || d.length == 0) return nil;
+    NSString *t = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (t) return t;
+    unsigned long gbk = 0x0632;   // kCFStringEncodingGB_18030_2000
+    NSInteger conv = CFStringConvertEncodingToNSStringEncoding((CFStringEncoding)gbk);
+    t = [[NSString alloc] initWithData:d encoding:conv];
+    if (t) return t;
+    // 最终兜底: 按 latin1 解(保证不丢数据), 中文会乱码但不影响 ASCII 关键词匹配
+    t = [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+    return t;
+}
+
 // ==================== 战斗源码摘要器 ====================
 // 读取 Documents/files/ 下的 .lua 明文, 提取与
 // 移速/攻速/血量/伤害/死亡/无敌 相关的代码行 → 单文件回传(体积小)
@@ -542,9 +558,19 @@ static void LCJTAnalyzeCombat(void) {
     @autoreleasepool {
         NSString *root = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/files"];
         NSFileManager *fm = [NSFileManager defaultManager];
+        BOOL rootIsDir = NO;
+        BOOL rootOK = [fm fileExistsAtPath:root isDirectory:&rootIsDir];
+        NSArray *rootItems = rootOK ? [fm contentsOfDirectoryAtPath:root error:nil] : nil;
+        LCJTLog(@"摘要: root=%@ exists=%d isDir=%d items=%lu", root, rootOK, rootIsDir,
+                (unsigned long)rootItems.count);
         NSMutableString *rep = [NSMutableString string];
         NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-        int nfile = 0, nline = 0;
+        int nfile = 0, nline = 0, nAll = 0, nLua = 0;
+        if (!rootOK || rootItems.count == 0) {
+            NSString *alt = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+            LCJTLog(@"摘要: 兜底改用 %@", alt);
+            stack = [NSMutableArray arrayWithObject:alt];
+        }
         while (stack.count && nfile < 4000) {
             NSString *dir = stack.lastObject; [stack removeLastObject];
             for (NSString *it in [fm contentsOfDirectoryAtPath:dir error:nil]) {
@@ -552,7 +578,9 @@ static void LCJTAnalyzeCombat(void) {
                 BOOL isDir = NO;
                 if (![fm fileExistsAtPath:full isDirectory:&isDir]) continue;
                 if (isDir) { [stack addObject:full]; continue; }
+                nAll++;
                 if (![full.pathExtension.lowercaseString isEqualToString:@"lua"]) continue;
+                nLua++;
                 NSString *b = full.lastPathComponent.lowercaseString;
                 // 优先关键文件
                 BOOL key = ([b containsString:@"gameactor"] || [b containsString:@"moveable"] ||
@@ -563,7 +591,7 @@ static void LCJTAnalyzeCombat(void) {
                             [b containsString:@"magicinfo"] || [b containsString:@"main.lua"] ||
                             [b containsString:@"state"] || [b containsString:@"hud"]);
                 if (!key) continue;
-                NSString *txt = [NSString stringWithContentsOfFile:full encoding:NSUTF8StringEncoding error:nil];
+                NSString *txt = LCJTReadText(full);
                 if (!txt) continue;
                 nfile++;
                 [rep appendFormat:@"\n\n===== %@ (%lu B) =====\n", full, (unsigned long)txt.length];
@@ -592,15 +620,21 @@ static void LCJTAnalyzeCombat(void) {
             NSString *f2 = [root stringByAppendingPathComponent:
                             [@"mod_fgcq/cqwl_218435/scripts" stringByAppendingPathComponent:rel]];
             for (NSString *f in @[f1, f2]) {
-                NSString *t = [NSString stringWithContentsOfFile:f encoding:NSUTF8StringEncoding error:nil];
+                NSString *t = LCJTReadText(f);
                 if (!t) continue;
                 [rep appendFormat:@"\n\n########## FULL %@ (%lu B) ##########\n%@\n", f, (unsigned long)t.length, t];
             }
         }
         NSString *out = [LCJTDocPath() stringByAppendingPathComponent:@"lcjt_战斗源码摘要.txt"];
         [rep writeToFile:out atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        g_note = [NSString stringWithFormat:@"源码摘要: %d文件 %d行", nfile, nline];
-        LCJTLog(@"战斗源码摘要完成: 文件%d 命中行%d -> %@", nfile, nline, out);
+        // 无论是否命中, 都写入诊断头
+        NSString *hdr = [NSString stringWithFormat:
+            @"# root=%@ exists=%d items=%lu 见到文件=%d lua=%d 采用=%d 命中行=%d\n",
+            root, rootOK, (unsigned long)rootItems.count, nAll, nLua, nfile, nline];
+        NSString *final = [hdr stringByAppendingString:rep];
+        [final writeToFile:out atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        g_note = [NSString stringWithFormat:@"摘要: 见%dlua 采%d 行%d", nLua, nfile, nline];
+        LCJTLog(@"摘要完成: 见文件%d lua%d 采用%d 行%d -> %@", nAll, nLua, nfile, nline, out);
     }
 }
 static void LCJTAnalyzeCombatAsync(void) {
